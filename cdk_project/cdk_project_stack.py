@@ -361,7 +361,7 @@ class CdkProjectStack(Stack):
 
         # RDS
         postgre = rds.DatabaseInstance(
-            self, 'postgre',
+            self, 'postgreDB',
             engine = rds.DatabaseInstanceEngine.postgres(version=rds.PostgresEngineVersion.VER_15_2),
             #instace_type = ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE2, ec2.InstanceSize.SMALL),
             vpc = vpc,
@@ -372,7 +372,7 @@ class CdkProjectStack(Stack):
             #     'username': secret.secret_value_from_json('username').to_string(),
             #     'password': secret.secret_value_from_json('password')
             # },
-            database_name = 'PG_DB',
+            database_name = 'PG_Database',
         )
 
 
