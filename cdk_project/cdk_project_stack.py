@@ -1,4 +1,5 @@
 from aws_cdk import (
+    Duration,
     Stack,
     Aws,
     aws_apigateway as apigw,
@@ -22,6 +23,11 @@ from aws_cdk import (
     aws_sqs as sqs,
     aws_events as events,
     aws_events_targets as targets,
+    RemovalPolicy,
+    aws_cloudwatch as cloudwatch,
+    aws_cloudwatch_actions as cw_actions,
+    aws_sns as sns,
+    aws_sns_subscriptions as subscriptions,
 )
 from constructs import Construct
 from .lambdaBucket import LambdaBucket
@@ -38,7 +44,7 @@ class CdkProjectStack(Stack):
         # Lambda -> S3 integration
         lambdaBucket = LambdaBucket(
             self, 'LambdaBucketConstruct', 
-            bucketName='cdkprojectstack-lambdabucketconstructmybucketc0199-qomhqfdp814e',
+            #bucketName='cdkprojectstack-lambdabucketconstructmybucketc0199-qomhqfdp814e',
         )
 
         # Lambda -> DynamoDB integration
@@ -90,6 +96,7 @@ class CdkProjectStack(Stack):
         userPool = cognito.UserPool(
             self, 'MyUserPool',
             self_sign_up_enabled=True,
+            removal_policy=RemovalPolicy.DESTROY,
         )
 
         auth = apigw.CognitoUserPoolsAuthorizer(
@@ -318,6 +325,8 @@ class CdkProjectStack(Stack):
         cfBucket = s3.Bucket(
             self, 'cfBucket',
             access_control=s3.BucketAccessControl.PRIVATE,
+            removal_policy = RemovalPolicy.DESTROY,
+            auto_delete_objects = True,
         )
 
         OAI = cloudfront.OriginAccessIdentity(self, 'OAI')
@@ -523,9 +532,48 @@ class CdkProjectStack(Stack):
             self, 'Rule',
             event_pattern=events.EventPattern(
                 source=["aws.s3"],
-                detail_type=["Object Created"],
+                detail_type=["Object Deleted"],
                 detail={"bucket" : {"name" : [lambdaBucket.bucket.bucket_name]}},
             )
         )
 
         rule.add_target(targets.LambdaFunction(VPCLambda))
+        VPCLambda.grant_invoke(IAM.ServicePrincipal('events.amazonaws.com'))
+
+
+
+        # Defining alarms on metrics
+        topic = sns.Topic(
+            self, 'CloudWatchAlarmTopic',
+            display_name = 'CloudWatchAlarmTopic',
+        )
+
+        metric_num_of_errors = VPCLambda.metric_errors()
+        lambda_num_of_errors_alarm = cloudwatch.Alarm(
+            self, 'lambda_error_invocations_alarm',
+            metric = metric_num_of_errors,
+            threshold = 1,
+            evaluation_periods = 1,
+            comparison_operator = cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        )
+
+        topic.add_subscription(subscriptions.EmailSubscription('ivanstanislavov@abv.bg'))
+        lambda_num_of_errors_alarm.add_alarm_action(cw_actions.SnsAction(topic))
+
+
+        bucket_size_alarm = cloudwatch.Alarm(
+            self, 'bucket_size_alarm',
+            metric = cloudwatch.Metric(
+                metric_name = 'BucketSizeBytes',
+                namespace = 'AWS/S3',
+                dimensions_map = {'BucketName': lambdaBucket.bucket.bucket_name, 'StorageType' : "StandardStorage"},
+                period = Duration.days(1),
+                statistic = 'Maximum'
+            ),
+            evaluation_periods = 1,
+            threshold = 10000000000, # 1GB
+        )
+
+        bucket_size_alarm.add_alarm_action(cw_actions.SnsAction(topic))
+
+

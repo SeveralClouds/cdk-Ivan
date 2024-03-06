@@ -2,6 +2,7 @@ from constructs import Construct
 from aws_cdk import (
     aws_dynamodb as ddb,
     aws_lambda as _lambda,
+    RemovalPolicy,
 )
 
 class LambdaDynamoDB(Construct):
@@ -22,6 +23,7 @@ class LambdaDynamoDB(Construct):
             partition_key = {'name': 'order_id', 'type': ddb.AttributeType.STRING},
             stream = ddb.StreamViewType.NEW_IMAGE,
             table_name = 'orders',
+            removal_policy = RemovalPolicy.DESTROY,
         )
 
         self._handler = _lambda.Function(
