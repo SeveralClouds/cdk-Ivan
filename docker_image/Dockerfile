@@ -1,7 +1,0 @@
-from alpine:3.8
-RUN apk add -U \
-    python3 \
-    py3-pip &&\
-    pip3 install awscli boto3
-COPY ./queue_service.py /queue_service.py
-CMD ["/queue_service.py"]
