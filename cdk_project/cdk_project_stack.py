@@ -1,5 +1,4 @@
 from aws_cdk import (
-    # Duration,
     Stack,
     Aws,
     aws_apigateway as apigw,
@@ -16,6 +15,13 @@ from aws_cdk import (
     aws_cognito as cognito,
     aws_rds as rds,
     aws_secretsmanager as secretsmanager,
+    aws_ecs as ecs,
+    aws_ecs_patterns as ecs_patterns,
+    aws_ecr as ecr,
+    aws_ecr_assets as ecr_assets,
+    aws_sqs as sqs,
+    aws_events as events,
+    aws_events_targets as targets,
 )
 from constructs import Construct
 from .lambdaBucket import LambdaBucket
@@ -23,23 +29,16 @@ from .lambdaDynamoDB import LambdaDynamoDB
 from .SQSlambda import SQSLambda
 import json as JSON
 
+
 class CdkProjectStack(Stack):
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # Lambda hello world
-        hello_lambda = _lambda.Function(
-            self, 'HelloHandler',
-            runtime = _lambda.Runtime.PYTHON_3_9,
-            code = _lambda.Code.from_asset('lambda'),
-            handler = 'hello.handler',
-        )
-
         # Lambda -> S3 integration
         lambdaBucket = LambdaBucket(
             self, 'LambdaBucketConstruct', 
-            bucket_name='cdkprojectstack-lambdabucketconstructmybucketc0199-qomhqfdp814e',
+            bucketName='cdkprojectstack-lambdabucketconstructmybucketc0199-qomhqfdp814e',
         )
 
         # Lambda -> DynamoDB integration
@@ -54,11 +53,9 @@ class CdkProjectStack(Stack):
             tableName=lambdaDynamoDB.table.table_name,
         )
 
-        # Grant permission to DynamoDB table
-        lambdaDynamoDB.table.grant_read_write_data(sqsLambda.handler)
 
 
-        # Custom integration
+        # Custom integration: API GW -> SQS
         integrationRole =   IAM.Role(
             self, 'integration-role',
             assumed_by = IAM.ServicePrincipal('apigateway.amazonaws.com'),
@@ -88,7 +85,8 @@ class CdkProjectStack(Stack):
         methodResponse = apigw.MethodResponse(status_code='200')
 
 
-        # Cognito integration
+
+        # Cognito integration with API GW
         userPool = cognito.UserPool(
             self, 'MyUserPool',
             self_sign_up_enabled=True,
@@ -101,24 +99,27 @@ class CdkProjectStack(Stack):
 
 
 
-
         # API Gateway
         api = apigw.RestApi (
             self, 'Endpoint',
         )
 
+        # /book
         book = api.root.add_resource('book')
 
+        # /book/books
         books = book.add_resource('books')
         books.add_method('GET', apigw.LambdaIntegration(lambdaBucket._handler),
                         authorizer = auth,
                         authorization_type = apigw.AuthorizationType.COGNITO)
 
+        # /book/orders
         orders = book.add_resource('orders')
         orders.add_method('POST', apigw.LambdaIntegration(lambdaDynamoDB._handler),
                          authorizer = auth,
                          authorization_type = apigw.AuthorizationType.COGNITO)
 
+        # /book/proc
         proc = book.add_resource('proc')
         proc.add_method(
             'POST', apiResourceSQSIntegration,
@@ -126,11 +127,16 @@ class CdkProjectStack(Stack):
         )
 
 
+
         # NAT
         NAT = ec2.NatProvider.gateway()
+        NAT2 = ec2.NatProvider.gateway()
         
         
+
         # VPC
+        
+        # VPC1 : Lambda, ElastiCache, RDS (PostgreSQL)
         vpc = ec2.Vpc(
             self, "VPC",
             max_azs=2,
@@ -149,35 +155,45 @@ class CdkProjectStack(Stack):
             nat_gateways=1
         )
 
-
+        # VPC2 : ALB, Fargate
+        vpc2 = ec2.Vpc(
+            self, "VPC2",
+            max_azs=2,
+            subnet_configuration = [
+                ec2.SubnetConfiguration(
+                    name="public",
+                    subnet_type = ec2.SubnetType.PUBLIC
+                ),
+                ec2.SubnetConfiguration(
+                    name="private",
+                    subnet_type = ec2.SubnetType.PRIVATE_ISOLATED,
+                )
+            ],
+            nat_gateway_provider = NAT2,
+            nat_gateway_subnets = ec2.SubnetSelection(subnet_type = ec2.SubnetType.PUBLIC),
+            nat_gateways = 1
+        )
 
 
         # Select subnets from VPC
+
+        # VPC1
         VPCSubnetPUBLIC = ec2.SubnetSelection(subnet_type = ec2.SubnetType.PUBLIC)
         VPCSubnetPRIVATE = ec2.SubnetSelection(subnet_type = ec2.SubnetType.PRIVATE_ISOLATED)
-        privateSubNets = [ps.subnet_id for ps in vpc.private_subnets]
+
         privateSubnets = vpc.select_subnets(
+            subnet_type = ec2.SubnetType.PRIVATE_ISOLATED
+        )
+
+        # VPC2
+        privateSubnets2 = vpc2.select_subnets(
             subnet_type = ec2.SubnetType.PRIVATE_ISOLATED
         )
         
 
-        # Deploy NAT Gateway
-        # NAT = ec2.CfnNatGateway(
-        #     self, 'MyNAT',
-        #     subnet_id = vpc.private_subnets, #'subnet-0859c385b4096c7cc', # private_subnet_ids = [ps.subnet_id for ps in vpc.private_subnets]
-        #     allocation_id = 'eipalloc-08540aa050ba93c9a' #'eipalloc-08540aa050ba93c9a' us  #'eipalloc-090b33762620087a1' eu
-        # )
+        # Add route for NAT in private subnets
 
-        # # Add route table entry for the NAT Gateway
-        # route_table_entry = ec2.CfnRoute(
-        #     self, 'MyRoute',
-        #     route_table_id = 'rtb-0e8f618f4c2a122f1',
-        #     destination_cidr_block = '0.0.0.0/0',
-        #     nat_gateway_id = NAT.ref
-        # )
-
-
-        # Add route for NAT in private subnet
+        # VPC1
         route_table_entry = ec2.CfnRoute(
             self, 'MyRoute',
             route_table_id = privateSubnets.subnets[0].route_table.route_table_id,
@@ -185,7 +201,31 @@ class CdkProjectStack(Stack):
             nat_gateway_id = NAT.configured_gateways[0].gateway_id
         )
 
-        # Create SG for Lambda function
+        route_table_entry2 = ec2.CfnRoute(
+            self, 'MyRoute2',
+            route_table_id = privateSubnets.subnets[1].route_table.route_table_id,
+            destination_cidr_block = '0.0.0.0/0',
+            nat_gateway_id = NAT.configured_gateways[0].gateway_id
+        )
+
+        # VPC2
+        route_table_entry_vpc2_1 = ec2.CfnRoute(
+            self, 'MyRouteVPC21',
+            route_table_id = privateSubnets2.subnets[0].route_table.route_table_id,
+            destination_cidr_block = '0.0.0.0/0',
+            nat_gateway_id = NAT2.configured_gateways[0].gateway_id
+        )
+
+        route_table_entry_vpc2_2 = ec2.CfnRoute(
+            self, 'MyRouteVPC22',
+            route_table_id = privateSubnets2.subnets[1].route_table.route_table_id,
+            destination_cidr_block = '0.0.0.0/0',
+            nat_gateway_id = NAT2.configured_gateways[0].gateway_id
+        )
+
+
+
+        # Create SG for Lambda function inside the VPC
         VPCLambdaSG = ec2.SecurityGroup(
             self, 'VPCLambdaSG',
             vpc = vpc,
@@ -193,7 +233,6 @@ class CdkProjectStack(Stack):
             allow_all_outbound = True,
         )
 
-        #VPCLambdaSG.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.all_traffic())
 
 
         # Redis
@@ -226,8 +265,22 @@ class CdkProjectStack(Stack):
 
         redis_endpoint = redisCluster.attr_redis_endpoint_address
 
+
+        # Secrets manager for RDS (PostgreSQL) credentials
+        secret = secretsmanager.Secret(
+            self, 'secret',
+            generate_secret_string = secretsmanager.SecretStringGenerator(
+                secret_string_template = JSON.dumps({'username':'postgres'}),
+                generate_string_key = "password",
+                exclude_characters = "\"@/\\",
+                exclude_punctuation = True,
+                include_space = False,
+            )
+        )
+
         
-        # Lambda in VPC
+        # Lambda in VPC : Gets triggered by EventBridge/DDB Streams , 
+        # integrates with ElastiCache, Secrets Manager, RDS (PostreSQL)
         VPCLambda = _lambda.Function(
             self, 'vpc_lambda',
             runtime = _lambda.Runtime.PYTHON_3_9,
@@ -240,16 +293,25 @@ class CdkProjectStack(Stack):
             'BUCKET_NAME' : lambdaBucket.bucket.bucket_name,
             'REDIS_HOST' : redis_endpoint,
             'REDIS_PORT' : '6379',
+            'SECRET_NAME' : secret.secret_name,
+            'REGION_NAME' : 'us-east-1'
             }
         )
 
 
-        # Grant permission to Lambda function to access S3 bucket
+        # Allowing VPC Lambda to access Secrets manager
+        SecretsManagerStatement = IAM.PolicyStatement()
+        SecretsManagerStatement.add_actions("secretsmanager:*")
+        SecretsManagerStatement.add_resources("*")
+        VPCLambda.add_to_role_policy(SecretsManagerStatement)
+
+        # Grant permission to VPC Lambda function to access S3 bucket
         lambdaBucket.bucket.grant_read_write(VPCLambda)
 
-        # Set up DynamoDB Streams as event source for Lambda
+        # Set up DynamoDB Streams as event source for VPC Lambda
         DDBEventSource = event_sources.DynamoEventSource(lambdaDynamoDB.table, starting_position=_lambda.StartingPosition.LATEST)
         VPCLambda.add_event_source(DDBEventSource)
+
 
 
         # Cloudfront distribution origin - S3 bucket
@@ -268,16 +330,6 @@ class CdkProjectStack(Stack):
             retain_on_delete=False
         )
         
-        # Cloudfront distribution
-        # cloudfrontDistribution = cloudfront.Distribution(
-        #     self, 'myDist',
-        #     default_behavior=cloudfront.BehaviorOptions(
-        #         origin=origins.RestApiOrigin(api),
-        #         allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
-        #     ),
-        #     additional_behaviors={'/image/' : origins.S3Origin(cfBucket, origin_access_identity=OAI)}
-        # )
-
 
         # WAF
         waf = wafv2.CfnWebACL(
@@ -310,11 +362,24 @@ class CdkProjectStack(Stack):
         )
 
 
-        # Cloudfront distribution
+        # Lambda@Edge
+        lambdaEdge = cloudfront.experimental.EdgeFunction(
+            self, 'lambdaEdge',
+            runtime = _lambda.Runtime.PYTHON_3_9,
+            code = _lambda.Code.from_asset('lambda_edge'),
+            handler = 'lambda_edge.handler',
+        )
+
+
+        # Cloudfront distribution for S3 and API GW
         cloudfrontDistribution = cloudfront.Distribution(
             self, 'myDist',
             default_behavior=cloudfront.BehaviorOptions(
                 origin=origins.S3Origin(cfBucket, origin_access_identity=OAI),
+                edge_lambdas=[cloudfront.EdgeLambda(
+                    function_version=lambdaEdge.current_version,
+                    event_type=cloudfront.LambdaEdgeEventType.VIEWER_RESPONSE,
+                )]
             ),
             additional_behaviors={'/book/*' : cloudfront.BehaviorOptions(
                 origin = origins.RestApiOrigin(api),
@@ -338,60 +403,129 @@ class CdkProjectStack(Stack):
         )
 
 
-        # Secrets manager
-        secret = secretsmanager.Secret(
-            self, 'secret',
-            generate_secret_string = secretsmanager.SecretStringGenerator(
-                secret_string_template = JSON.dumps({'username':'postgres'}),
-                generate_string_key = "password",
-                exclude_characters = "\"@/\\",
-                exclude_punctuation = True,
-                include_space = False,
-                #allowed_characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-            )
-        )
-
-
-        # Allowing Lambda to access Secrets manager
-        SecretsManagerStatement = IAM.PolicyStatement()
-        SecretsManagerStatement.add_actions("secretsmanager:*")
-        SecretsManagerStatement.add_resources("*")
-        VPCLambda.add_to_role_policy(SecretsManagerStatement)
-
 
         # RDS
         postgre = rds.DatabaseInstance(
             self, 'postgreDB',
             engine = rds.DatabaseInstanceEngine.postgres(version=rds.PostgresEngineVersion.VER_15_2),
-            #instace_type = ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE2, ec2.InstanceSize.SMALL),
+            instance_type = ec2.InstanceType.of(ec2.InstanceClass.BURSTABLE3, ec2.InstanceSize.SMALL),
             vpc = vpc,
             vpc_subnets = VPCSubnetPRIVATE,
             security_groups = [dbSG],
             credentials = rds.Credentials.from_secret(secret),
-            # credentials = {
-            #     'username': secret.secret_value_from_json('username').to_string(),
-            #     'password': secret.secret_value_from_json('password')
-            # },
             database_name = 'PG_Database',
         )
 
 
+        # Fargate cluster to poll from SQS
+        ecs_cluster = ecs.Cluster(
+            self, 'ecs_sqs_cluster',
+            vpc = vpc,
+        )
+
+        ecs_task_definition = ecs.FargateTaskDefinition(
+            self, 'ecs_sqs_task_definition',
+            cpu = 256,
+            memory_limit_mib = 512,
+            execution_role = IAM.Role(
+                self, 'role',
+                assumed_by = IAM.ServicePrincipal('ecs-tasks.amazonaws.com'),
+                managed_policies = [IAM.ManagedPolicy.from_aws_managed_policy_name('service-role/AmazonECSTaskExecutionRolePolicy')],
+            )
+        )
+
+        ecs_task_definition.add_container(
+            'ecs_sqs_container',
+            environment = {"QUEUE_NAME": sqsLambda.queue.queue_name, "TABLE_NAME": lambdaDynamoDB.table.table_name, "AWS_DEFAULT_REGION":"us-east-1"},
+            image = ecs.ContainerImage.from_registry('095186745110.dkr.ecr.us-east-1.amazonaws.com/cdk-hnb659fds-container-assets-095186745110-us-east-1:latest5'),
+            logging = ecs.LogDrivers.aws_logs(stream_prefix='ecs_sqs'),
+        )
+
+        ecs_service = ecs.FargateService(
+            self, 'ecs_service_fg',
+            cluster = ecs_cluster,
+            task_definition = ecs_task_definition,
+            desired_count = 1,
+        )
+
+        # Give permissions to the Fargate task  # TO DO : less priviliges
+        sqs_permissions = IAM.PolicyStatement()
+        sqs_permissions.add_actions("sqs:*")
+        sqs_permissions.add_resources("*")
+        ecs_service.task_definition.add_to_task_role_policy(sqs_permissions)
+
+        db_permissions = IAM.PolicyStatement()
+        db_permissions.add_actions("dynamodb:*")
+        db_permissions.add_resources("*")
+        ecs_service.task_definition.add_to_task_role_policy(db_permissions)
+
+        comprehend_permissions = IAM.PolicyStatement()
+        comprehend_permissions.add_actions("comprehend:*")
+        comprehend_permissions.add_resources("*")
+        ecs_service.task_definition.add_to_task_role_policy(comprehend_permissions)
 
 
 
-        
+        # ALB Fargate cluster
+        alb_ecs_cluster = ecs.Cluster(
+            self, 'alb_cluster',
+            vpc = vpc2
+        )
+
+        alb_ecs_task_definition = ecs.FargateTaskDefinition(
+            self, 'ecs_alb_task_definition',
+            cpu = 256,
+            memory_limit_mib = 512,
+            execution_role = IAM.Role(
+                self, 'alb_ecs_execution_role',
+                assumed_by = IAM.ServicePrincipal('ecs-tasks.amazonaws.com'),
+                managed_policies = [IAM.ManagedPolicy.from_aws_managed_policy_name('service-role/AmazonECSTaskExecutionRolePolicy')],
+            )
+        )
+
+        alb_ecs_task_definition.add_container(
+            'ecs_alb_container',
+            #environment = {"QUEUE_NAME": sqsLambda.queue.queue_name, "TABLE_NAME": lambdaDynamoDB.table.table_name, "AWS_DEFAULT_REGION":"us-east-1"},
+            image = ecs.ContainerImage.from_registry('095186745110.dkr.ecr.us-east-1.amazonaws.com/cdk-hnb659fds-container-assets-095186745110-us-east-1:webFlaskV2'),
+            logging = ecs.LogDrivers.aws_logs(stream_prefix='ecs_alb'),
+            port_mappings = [ecs.PortMapping(container_port = 5000)] # 5000 is the port the flask app is running on
+        )
 
 
-      
-        
+        alb_ecs = ecs_patterns.ApplicationLoadBalancedFargateService(
+            self, 'alb_ecs_pattern',
+            cluster = alb_ecs_cluster,
+            desired_count = 1,
+            task_definition = alb_ecs_task_definition,
+            task_subnets = ec2.SubnetSelection(
+                subnets = [privateSubnets2.subnets[0]]
+            ),
+        )
+
+
+        # Cloudfront To ALB
+        cfALB = cloudfront.Distribution(
+            self, 'ALB_Dist',
+            default_behavior=cloudfront.BehaviorOptions(
+                origin=origins.HttpOrigin(
+                    alb_ecs.load_balancer.load_balancer_dns_name,
+                    protocol_policy = cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+                ),
+                allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
+               # viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.ALLOW_ALL,         
+            )
+        )    
 
 
 
+        # Eventbridge rule triggered from S3 and calling Lambda
+        rule = events.Rule(
+            self, 'Rule',
+            event_pattern=events.EventPattern(
+                source=["aws.s3"],
+                detail_type=["Object Created"],
+                detail={"bucket" : {"name" : [lambdaBucket.bucket.bucket_name]}},
+            )
+        )
 
-
-
-        
-
-        
-
-        
+        rule.add_target(targets.LambdaFunction(VPCLambda))

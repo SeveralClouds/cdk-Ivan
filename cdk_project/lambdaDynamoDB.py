@@ -21,6 +21,7 @@ class LambdaDynamoDB(Construct):
             self, 'Orders',
             partition_key = {'name': 'order_id', 'type': ddb.AttributeType.STRING},
             stream = ddb.StreamViewType.NEW_IMAGE,
+            table_name = 'orders',
         )
 
         self._handler = _lambda.Function(

@@ -14,7 +14,7 @@ class LambdaBucket(Construct):
         return self._bucket
 
 
-    def __init__(self, scope: Construct, id: str, bucket_name: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, id: str, bucketName: str, **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
 
         self._bucket = s3.Bucket(self, 'myBucket',)
@@ -24,7 +24,7 @@ class LambdaBucket(Construct):
         handler = 'lambda-bucket.handler',
         code = _lambda.Code.from_asset('lambda'),
         environment={
-            'BUCKET_NAME' : bucket_name # self._bucket.bucket_name
+            'BUCKET_NAME' : bucketName # self._bucket.bucket_name
         })
 
         self._bucket.grant_read(self.handler)

@@ -10,8 +10,10 @@ s3 = boto3.client('s3')
 
 # Get RDS credentials from Secrets Manager
 def get_secret():
-    secret_name="secret4DA88516-A9x7YB90sNhr"
-    region_name="us-east-1"
+    #secret_name="secret4DA88516-A9x7YB90sNhr"
+    secret_name = os.environ['SECRET_NAME']
+    #region_name="us-east-1"
+    region_name = os.environ['REGION_NAME']
 
     session = boto3.session.Session()
     client = session.client(
@@ -81,13 +83,17 @@ def handler(event, context):
         raise e
     print("Connected to Postgres")
     # Query the DB
-    query='SELECT * FROM COMPANY'
+    query_create = 'CREATE TABLE IF NOT EXISTS app_user (username varchar(45) NOT NULL, password varchar(450) NOT NULL, PRIMARY KEY (username))'
+    query_insert = 'INSERT INTO app_user(username, password) SELECT "admin", "admin" WHERE NOT EXISTS (SELECT * FROM app_user WHERE username="admin")'
+    query = 'SELECT * FROM app_user'
     with conn.cursor() as cur:
+        cur.execute(query_create)
+        cur.exeute(query_insert)
         cur.execute(query)
         # Print query results
         print(cur.fetchall())
 
-    #conn.close()
+    conn.close()
 
 # def handler(event, context):
 #     print("first line")
