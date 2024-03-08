@@ -6,5 +6,9 @@
     "us-east-1d",
     "us-east-1e",
     "us-east-1f"
-  ]
+  ],
+  "hosted-zone:account=095186745110:domainName=i.sevc.link:region=us-east-1": {
+    "Id": "/hostedzone/Z0157562H7SL7H43EDX5",
+    "Name": "i.sevc.link."
+  }
 }

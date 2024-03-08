@@ -28,6 +28,9 @@ from aws_cdk import (
     aws_cloudwatch_actions as cw_actions,
     aws_sns as sns,
     aws_sns_subscriptions as subscriptions,
+    aws_kms as kms,
+    aws_certificatemanager as acm,
+    aws_route53 as route53,
 )
 from constructs import Construct
 from .lambdaBucket import LambdaBucket
@@ -44,7 +47,6 @@ class CdkProjectStack(Stack):
         # Lambda -> S3 integration
         lambdaBucket = LambdaBucket(
             self, 'LambdaBucketConstruct', 
-            #bucketName='cdkprojectstack-lambdabucketconstructmybucketc0199-qomhqfdp814e',
         )
 
         # Lambda -> DynamoDB integration
@@ -140,9 +142,7 @@ class CdkProjectStack(Stack):
         NAT2 = ec2.NatProvider.gateway()
         
         
-
         # VPC
-        
         # VPC1 : Lambda, ElastiCache, RDS (PostgreSQL)
         vpc = ec2.Vpc(
             self, "VPC",
@@ -150,16 +150,19 @@ class CdkProjectStack(Stack):
             subnet_configuration=[
                 ec2.SubnetConfiguration(
                     name="public",
-                    subnet_type=ec2.SubnetType.PUBLIC
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask = 18,
                 ),
                 ec2.SubnetConfiguration(
                     name="private",
                     subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+                    cidr_mask = 18,
                 )
             ],
             nat_gateway_provider=NAT,
             nat_gateway_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
-            nat_gateways=1
+            nat_gateways=1,
+            ip_addresses = ec2.IpAddresses.cidr("10.0.0.0/16"),
         )
 
         # VPC2 : ALB, Fargate
@@ -169,16 +172,20 @@ class CdkProjectStack(Stack):
             subnet_configuration = [
                 ec2.SubnetConfiguration(
                     name="public",
-                    subnet_type = ec2.SubnetType.PUBLIC
+                    subnet_type = ec2.SubnetType.PUBLIC,
+                    cidr_mask = 18,
+                    
                 ),
                 ec2.SubnetConfiguration(
                     name="private",
                     subnet_type = ec2.SubnetType.PRIVATE_ISOLATED,
+                    cidr_mask = 18,
                 )
             ],
             nat_gateway_provider = NAT2,
             nat_gateway_subnets = ec2.SubnetSelection(subnet_type = ec2.SubnetType.PUBLIC),
-            nat_gateways = 1
+            nat_gateways = 1,
+            ip_addresses = ec2.IpAddresses.cidr("10.1.0.0/16"),
         )
 
 
@@ -196,7 +203,8 @@ class CdkProjectStack(Stack):
         privateSubnets2 = vpc2.select_subnets(
             subnet_type = ec2.SubnetType.PRIVATE_ISOLATED
         )
-        
+
+
 
         # Add route for NAT in private subnets
 
@@ -237,7 +245,7 @@ class CdkProjectStack(Stack):
             self, 'VPCLambdaSG',
             vpc = vpc,
             description = "Allow all traffic to and out of lambda",
-            allow_all_outbound = True,
+           allow_all_outbound = True,
         )
 
 
@@ -245,14 +253,13 @@ class CdkProjectStack(Stack):
         # Redis
         redisSubnetGroup = elasticache.CfnSubnetGroup(
             self, 'RedisSubnetGroup',
-            subnet_ids = [privateSubnets.subnets[0].subnet_id], # privateSubNets = [ps.subnet_id for ps in vpc.private_subnets]
+            subnet_ids = [privateSubnets.subnets[0].subnet_id],
             description = "subnet group for redis"
         )
 
         redisSG = ec2.SecurityGroup(
             self, 'redis-sec-group',
             vpc = vpc,
-            allow_all_outbound = True,
         )
 
         redisSG.add_ingress_rule(
@@ -285,7 +292,8 @@ class CdkProjectStack(Stack):
             )
         )
 
-        
+
+
         # Lambda in VPC : Gets triggered by EventBridge/DDB Streams , 
         # integrates with ElastiCache, Secrets Manager, RDS (PostreSQL)
         VPCLambda = _lambda.Function(
@@ -306,11 +314,16 @@ class CdkProjectStack(Stack):
         )
 
 
+
         # Allowing VPC Lambda to access Secrets manager
         SecretsManagerStatement = IAM.PolicyStatement()
-        SecretsManagerStatement.add_actions("secretsmanager:*")
-        SecretsManagerStatement.add_resources("*")
+        SecretsManagerStatement.add_actions("secretsmanager:GetResourcePolicy")
+        SecretsManagerStatement.add_actions("secretsmanager:GetSecretValue")
+        SecretsManagerStatement.add_actions("secretsmanager:DescribeSecret")
+        SecretsManagerStatement.add_actions("secretsmanager:ListSecretVersionIds")
+        SecretsManagerStatement.add_resources(secret.secret_arn)
         VPCLambda.add_to_role_policy(SecretsManagerStatement)
+
 
         # Grant permission to VPC Lambda function to access S3 bucket
         lambdaBucket.bucket.grant_read_write(VPCLambda)
@@ -319,6 +332,15 @@ class CdkProjectStack(Stack):
         DDBEventSource = event_sources.DynamoEventSource(lambdaDynamoDB.table, starting_position=_lambda.StartingPosition.LATEST)
         VPCLambda.add_event_source(DDBEventSource)
 
+        # Bucket to collect logs
+        bucket_logs = s3.Bucket(
+            self, 'bucket_logs_cf',
+            removal_policy = RemovalPolicy.DESTROY,
+            auto_delete_objects = True,
+            access_control = s3.BucketAccessControl.BUCKET_OWNER_FULL_CONTROL,
+            enforce_ssl = True,
+            block_public_access = s3.BlockPublicAccess.BLOCK_ALL,
+        )
 
 
         # Cloudfront distribution origin - S3 bucket
@@ -327,6 +349,9 @@ class CdkProjectStack(Stack):
             access_control=s3.BucketAccessControl.PRIVATE,
             removal_policy = RemovalPolicy.DESTROY,
             auto_delete_objects = True,
+            versioned = True,
+            server_access_logs_bucket = bucket_logs,
+            enforce_ssl = True,
         )
 
         OAI = cloudfront.OriginAccessIdentity(self, 'OAI')
@@ -339,8 +364,8 @@ class CdkProjectStack(Stack):
             retain_on_delete=False
         )
         
-
-        # WAF
+        
+        # WAF for Cloudfront
         waf = wafv2.CfnWebACL(
             self, 'CFWAF',
             default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
@@ -380,6 +405,14 @@ class CdkProjectStack(Stack):
         )
 
 
+        # Setting up acm certificate for Cloudfront
+        hosted_zone = route53.HostedZone.from_lookup(self, 'zone', domain_name='i.sevc.link')
+        cert1 = acm.Certificate.from_certificate_arn(
+            self, 'cert1',
+            certificate_arn = 'arn:aws:acm:us-east-1:095186745110:certificate/ff740c53-5b15-44cc-ac4c-f5bb80599c3b'
+        )
+
+
         # Cloudfront distribution for S3 and API GW
         cloudfrontDistribution = cloudfront.Distribution(
             self, 'myDist',
@@ -396,7 +429,20 @@ class CdkProjectStack(Stack):
                 )
             },
             web_acl_id=waf.attr_arn,
+            default_root_object='index.html',
+            domain_names = ['www.i.sevc.link'],
+            certificate = cert1,
         )
+
+
+        # Create CNAME record for the Cloudfront distribution
+        route53.CnameRecord(
+            self, 'cname',
+            record_name = 'www.i.sevc.link',
+            domain_name = cloudfrontDistribution.domain_name,
+            zone = hosted_zone,
+        )
+
 
 
         # RDS SG
@@ -408,9 +454,20 @@ class CdkProjectStack(Stack):
         dbSG.add_ingress_rule(
             peer = VPCLambdaSG,
             description = "Allow Lambda to access RDS",
-            connection = ec2.Port.tcp(5432)
+            connection = ec2.Port.tcp(5432),
         )
 
+
+        # KMS key for encryption at rest
+        key = kms.Key(
+            self, 'key',
+            #removal_policy = RemovalPolicy.DESTROY,
+        )
+
+        # key = kms.Key.from_key_arn(
+        #     self, 'key_from_arn',
+        #     key_arn = 'arn:aws:kms:us-east-1:095186745110:key/354a6515-970f-47b0-a148-bc102d0354b9',
+        # )
 
 
         # RDS
@@ -423,6 +480,9 @@ class CdkProjectStack(Stack):
             security_groups = [dbSG],
             credentials = rds.Credentials.from_secret(secret),
             database_name = 'PG_Database',
+            storage_encrypted = True,
+            storage_encryption_key = key,
+            multi_az = True,
         )
 
 
@@ -448,6 +508,7 @@ class CdkProjectStack(Stack):
             environment = {"QUEUE_NAME": sqsLambda.queue.queue_name, "TABLE_NAME": lambdaDynamoDB.table.table_name, "AWS_DEFAULT_REGION":"us-east-1"},
             image = ecs.ContainerImage.from_registry('095186745110.dkr.ecr.us-east-1.amazonaws.com/cdk-hnb659fds-container-assets-095186745110-us-east-1:latest5'),
             logging = ecs.LogDrivers.aws_logs(stream_prefix='ecs_sqs'),
+            readonly_root_filesystem = True,
         )
 
         ecs_service = ecs.FargateService(
@@ -457,19 +518,36 @@ class CdkProjectStack(Stack):
             desired_count = 1,
         )
 
-        # Give permissions to the Fargate task  # TO DO : less priviliges
+
+        # Give permissions to the Fargate task
+
+        # Permissions for fargate to access SQS queue
         sqs_permissions = IAM.PolicyStatement()
-        sqs_permissions.add_actions("sqs:*")
-        sqs_permissions.add_resources("*")
+        sqs_permissions.add_actions("sqs:ReceiveMessage")
+        sqs_permissions.add_actions("sqs:GetQueueAttributes")
+        sqs_permissions.add_actions("sqs:GetQueueUrl")
+        sqs_permissions.add_actions("sqs:ListQueues")
+        sqs_permissions.add_resources(sqsLambda.queue.queue_arn)
         ecs_service.task_definition.add_to_task_role_policy(sqs_permissions)
 
+        # Permissions for fargate to access DynamoDB table
         db_permissions = IAM.PolicyStatement()
-        db_permissions.add_actions("dynamodb:*")
-        db_permissions.add_resources("*")
+        db_permissions.add_actions("dynamodb:BatchWriteItem")
+        db_permissions.add_actions("dynamodb:PutItem")
+        db_permissions.add_actions("dynamodb:UpdateItem")
+        db_permissions.add_actions("dynamodb:DescribeTable")
+        db_permissions.add_actions("dynamodb:GetRecords")
+        db_permissions.add_resources(lambdaDynamoDB.table.table_arn)
         ecs_service.task_definition.add_to_task_role_policy(db_permissions)
 
+        # Permissions for fargate to access Comprehend
         comprehend_permissions = IAM.PolicyStatement()
-        comprehend_permissions.add_actions("comprehend:*")
+        comprehend_permissions.add_actions("comprehend:BatchDetectSentiment")
+        comprehend_permissions.add_actions("comprehend:DescribeSentimentDetectionJob")
+        comprehend_permissions.add_actions("comprehend:DescribeTargetedSentimentDetectionJob")
+        comprehend_permissions.add_actions("comprehend:DetectSentiment")
+        comprehend_permissions.add_actions("comprehend:ListSentimentDetectionJobs")
+        comprehend_permissions.add_actions("comprehend:ListTargetedSentimentDetectionJobs")
         comprehend_permissions.add_resources("*")
         ecs_service.task_definition.add_to_task_role_policy(comprehend_permissions)
 
@@ -494,12 +572,11 @@ class CdkProjectStack(Stack):
 
         alb_ecs_task_definition.add_container(
             'ecs_alb_container',
-            #environment = {"QUEUE_NAME": sqsLambda.queue.queue_name, "TABLE_NAME": lambdaDynamoDB.table.table_name, "AWS_DEFAULT_REGION":"us-east-1"},
             image = ecs.ContainerImage.from_registry('095186745110.dkr.ecr.us-east-1.amazonaws.com/cdk-hnb659fds-container-assets-095186745110-us-east-1:webFlaskV2'),
             logging = ecs.LogDrivers.aws_logs(stream_prefix='ecs_alb'),
-            port_mappings = [ecs.PortMapping(container_port = 5000)] # 5000 is the port the flask app is running on
+            port_mappings = [ecs.PortMapping(container_port = 5000)], # 5000 is the port the flask app is running on
+            readonly_root_filesystem = True,
         )
-
 
         alb_ecs = ecs_patterns.ApplicationLoadBalancedFargateService(
             self, 'alb_ecs_pattern',
@@ -510,6 +587,8 @@ class CdkProjectStack(Stack):
                 subnets = [privateSubnets2.subnets[0]]
             ),
         )
+        alb_ecs.load_balancer.set_attribute('deletion_protection.enabled', 'True')
+        alb_ecs.load_balancer.log_access_logs(bucket_logs, 'alb_acc_logs')
 
 
         # Cloudfront To ALB
@@ -521,9 +600,11 @@ class CdkProjectStack(Stack):
                     protocol_policy = cloudfront.OriginProtocolPolicy.HTTP_ONLY,
                 ),
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
-               # viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.ALLOW_ALL,         
-            )
-        )    
+                     
+            ),
+            web_acl_id=waf.attr_arn,
+            default_root_object = alb_ecs.load_balancer.load_balancer_dns_name, #REMOVE
+        )  
 
 
 
@@ -542,12 +623,15 @@ class CdkProjectStack(Stack):
 
 
 
-        # Defining alarms on metrics
+        # Defining CW alarms on metrics
         topic = sns.Topic(
             self, 'CloudWatchAlarmTopic',
             display_name = 'CloudWatchAlarmTopic',
+            master_key = key,
         )
+        topic.add_subscription(subscriptions.EmailSubscription('ivanstanislavov@abv.bg'))
 
+        # Metric for error count from Lambda invocations
         metric_num_of_errors = VPCLambda.metric_errors()
         lambda_num_of_errors_alarm = cloudwatch.Alarm(
             self, 'lambda_error_invocations_alarm',
@@ -555,12 +639,11 @@ class CdkProjectStack(Stack):
             threshold = 1,
             evaluation_periods = 1,
             comparison_operator = cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        )
-
-        topic.add_subscription(subscriptions.EmailSubscription('ivanstanislavov@abv.bg'))
+        ) 
         lambda_num_of_errors_alarm.add_alarm_action(cw_actions.SnsAction(topic))
 
 
+        # Metric for size of S3 bucket
         bucket_size_alarm = cloudwatch.Alarm(
             self, 'bucket_size_alarm',
             metric = cloudwatch.Metric(
@@ -571,9 +654,18 @@ class CdkProjectStack(Stack):
                 statistic = 'Maximum'
             ),
             evaluation_periods = 1,
-            threshold = 10000000000, # 1GB
+            threshold = 10000000000, # 10GB
         )
-
         bucket_size_alarm.add_alarm_action(cw_actions.SnsAction(topic))
+
+
+
+        # Power tools lambda
+        pt_func = _lambda.Function(
+            self, 'power_tools_func',
+            runtime = _lambda.Runtime.PYTHON_3_9,
+            code = _lambda.Code.from_asset('lambda_power_tools'),
+            handler = 'lambda_power_tools.handler',
+        )
 
 

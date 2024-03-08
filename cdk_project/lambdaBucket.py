@@ -18,15 +18,34 @@ class LambdaBucket(Construct):
 
     def __init__(self, scope: Construct, id: str, **kwargs) -> None:
         super().__init__(scope, id, **kwargs)
+        
+        # Bucket for logging
+        bucket_logs = s3.Bucket(
+            self, 'bucket_logs',
+            removal_policy = RemovalPolicy.DESTROY,
+            auto_delete_objects = True,
+            block_public_access = s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl = True,
+        )
+
+        # public_access_block_configuration_property = s3.CfnBucket.PublicAccessBlockConfigurationProperty(
+        #     restrict_public_buckets = True,
+        # )
 
         self._bucket = s3.Bucket(
             self, 'myBucket',
             removal_policy = RemovalPolicy.DESTROY,
             auto_delete_objects = True,
             event_bridge_enabled = True,
+            block_public_access = s3.BlockPublicAccess.BLOCK_ALL,
+            server_access_logs_bucket = bucket_logs,
+            versioned = True,
+            enforce_ssl = True,
+            #public_access_block_configuration = public_access_block_configuration_property,
         
         )
 
+        # Upload book titles and description file on deploy
         s3deploy.BucketDeployment(
             self, 'DeployBooksFile',
             sources=[s3deploy.Source.asset('./util')],

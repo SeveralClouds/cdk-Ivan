@@ -23,8 +23,13 @@ class LambdaDynamoDB(Construct):
             partition_key = {'name': 'order_id', 'type': ddb.AttributeType.STRING},
             stream = ddb.StreamViewType.NEW_IMAGE,
             table_name = 'orders',
-            removal_policy = RemovalPolicy.DESTROY,
+            removal_policy = RemovalPolicy.DESTROY,   
+            billing_mode = ddb.BillingMode.PAY_PER_REQUEST,
+            deletion_protection = True,
+            point_in_time_recovery = True,
         )
+
+        self._table.point_in_time_recovery = True
 
         self._handler = _lambda.Function(
             self, 'myLambdaDDB',
